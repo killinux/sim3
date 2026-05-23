@@ -253,7 +253,8 @@ else:
 | 冒烟测试 | 3 | 225 | 118s | 129K | ~$0.02 |
 | 快速 AB（校准前） | 100 | 768 | 59s | 375K | ~$0.06 |
 | 快速 AB（校准后） | 100 | 768 | 34s | 449K | ~$0.07 |
-| KuaiRand 验证 | 20 | 300 | 26s | ~350K | ~$0.05 |
+| KuaiRand 验证 v1 | 20 | 300 | 26s | ~350K | ~$0.05 |
+| KuaiRand 验证 v6 | 50 | 746 | 49s | ~600K | ~$0.09 |
 
 **DeepSeek prompt caching 生效**: 第二次运行速度从 59s 降到 34s（cache hit 降低延迟）。
 
@@ -268,53 +269,80 @@ else:
 - 12 种反馈信号：click, like, follow, comment, forward, hate, long_view, play_time_ms...
 - 随机曝光数据（`is_rand=1`）：无偏 ground truth
 
+详见 [12-kuairand-data-guide.md](12-kuairand-data-guide.md)
+
 ### 验证流程
 
 ```
 KuaiRand 数据
-  ├── user_features.csv → 初始化 20 个 Persona（真实活跃度/行为模式）
+  ├── user_features.csv → 初始化 Persona（真实活跃度/行为模式）
   ├── video_features.csv → 填充内容池（7583 真实视频）
   └── 交互日志 → 真实分布 = Ground Truth
                       ↓
               模拟分布 vs 真实分布
-              Wasserstein / JS 散度
+              Wasserstein / JS 散度 / KS 检验
 ```
 
-### 验证结果（v1 基线）
+### 校准迭代历程
 
-| 指标 | 快手真实 | 模拟 | 差距 | 说明 |
-|------|---------|------|------|------|
-| like_rate | 0.48% | 0.00% | 校准过强 | 需调回 |
-| comment_rate | 0.03% | 0.00% | 一致 | OK |
-| skip_rate | 47.98% | 79.67% | +66% | LLM 过度保守 |
-| completion_rate | 7.78% | 15.67% | +101% | 偏高 |
-| avg_watch_ratio | 0.445 | 0.172 | -61% | 偏低 |
-| **Wasserstein 距离** | - | **0.218** | - | 基线值 |
-| **JS 散度** | - | **0.097** | - | 基线值 |
+| 版本 | 核心改动 | like_rate | skip_rate | avg_wr | 问题 |
+|------|---------|-----------|-----------|--------|------|
+| 原始 | 无校准 | 52% | 38% | 0.72 | LLM 太友好 |
+| v1 | prompt 加基准率 + 后处理门控 | 0% | 80% | 0.17 | 校准过猛，LLM 太保守 |
+| v2 | 改为 target/llm_rate 门控 | 0% | 56% | 0.39 | LLM 不出 like=true |
+| v3 | LLM 只输出 interest, 去掉 like 字段 | 0% | 33% | 0.62 | skip 太少 |
+| v4 | 加 persona base_skip_prob | 0% | 84% | 0.20 | skip 过头 |
+| v5 | 降低 base_skip_prob | 0% | 84% | 0.20 | cache 导致未生效 |
+| **v6** | **interest 阈值由品类亲和度决定** | **0.27%** | **56%** | **0.39** | **接近真实** |
 
-### 分析
+**真实值参考**: like=0.48%, skip=48%, avg_wr=0.445
 
-1. Prompt 加了"be realistic, not generous"后 LLM 变得过度保守
-2. 校准层把 like 从 52% 压到了 0%（过度修正）
-3. 跳过率 80% 远高于真实的 48%
-4. 需要在"LLM 太友好"和"LLM 太保守"之间找到平衡
+### 关键洞察
 
-### 后续优化方向
+1. **LLM 天然做二值决策**（skip 或 watch_full），无法产生平滑 watch_ratio 分布
+2. **解决方案: 混合模型** — LLM 输出 interest_level (1-10)，统计模型用 Beta 分布生成 watch_ratio
+3. **参与动作完全由统计模型生成** — 用 persona 的真实 base_rate × interest_mult 做概率采样
+4. **品类亲和度是 skip 的核心驱动因素** — 不喜欢的品类直接压低 interest 使其落入 skip 区间
 
-- 调节 prompt 中的基准率描述（5-8% → 更精确的分品类基准）
-- 校准层参数调优（降低门控强度）
-- 用 KuaiRand 的真实参与率做 per-persona 的 base_rate 初始化
+### 当前最优结果（v6, 50 agent, KuaiRand 数据）
+
+| 指标 | 快手真实 | 模拟 v6 | 差距 | 状态 |
+|------|---------|---------|------|------|
+| like_rate | 0.48% | 0.27% | -44% | ✅ 同数量级 |
+| comment_rate | 0.03% | 0% | - | ⚠️ 样本太少 |
+| skip_rate | 48.0% | 56.4% | +18% | ⚠️ 接近 |
+| completion_rate | 7.8% | 20.8% | +167% | ⚠️ 偏高 |
+| avg_watch_ratio | 0.445 | 0.393 | -12% | ✅ 接近 |
 
 ---
 
-## 六、下一步计划
+## 六、验证状态总览
+
+| 验证项 | 状态 | 结果 |
+|--------|------|------|
+| 端到端可运行 | ✅ 完成 | 3/20/50/100 agent 均跑通 |
+| A/A 验证 | ✅ PASS | FPR=6%, p 值均匀分布 |
+| 参与率校准 | ✅ 基本到位 | like 0.27% vs 真实 0.48%（同数量级） |
+| skip_rate | ⚠️ 接近 | 56% vs 真实 48%（差 18%） |
+| avg_watch_ratio | ⚠️ 接近 | 0.393 vs 真实 0.445（差 12%） |
+| completion_rate | ⚠️ 偏高 | 20.8% vs 真实 7.8%（需压低） |
+| AB 方向一致性 | ❌ 待做 | 用 KuaiRand 随机 vs 正常推荐构造已知 AB |
+| 分品类验证 | ❌ 待做 | 各品类的参与率是否分别对齐 |
+| 多轮稳定性 | ❌ 待做 | 跑 10 次看方差 |
+| 1000 agent 缩放 | ❌ 待做 | 性能和成本验证 |
+| 历史 AB 回放 | ❌ 待做 | 需要真实 AB 实验数据 |
+
+---
+
+## 七、下一步计划
 
 | 优先级 | 任务 | 预期效果 |
 |--------|------|---------|
-| P0 | 校准层参数调优（like 从 0% 调回 1-5%） | Wasserstein 下降 |
-| P0 | 调节 prompt 平衡点（不太友好也不太保守） | skip_rate 接近 48% |
-| P1 | 扩大到 100 agent + KuaiRand 数据 | 更可靠的统计 |
-| P1 | 分品类验证（gaming/pets/food 各自的参与率） | 细粒度校准 |
-| P2 | 用户聚类 + 人口权重 | 实现 1K→1B 缩放 |
-| P2 | 推荐系统在线更新（反馈闭环） | 捕捉"推荐塑造偏好"动态 |
+| P0 | 压低 completion_rate（调整 interest 7-9 的 Beta 参数） | 从 20.8% 降到 ~10% |
+| P0 | 扩大验证到 100 agent + 更多交互 | 更稳定的统计量，comment/share 出现 |
+| P1 | AB 方向一致性验证 | 确认模拟能预测对 treatment effect 方向 |
+| P1 | 分品类验证 | 确认不同品类的参与模式差异被捕捉 |
+| P2 | 多轮稳定性（跑 10 次） | 确认结果方差可控 |
+| P2 | 1000 agent 缩放 | 验证性能和成本线性扩展 |
+| P3 | 用户聚类 + 人口权重 | 实现 1K→1B 缩放 |
 | P3 | Fine-tune 7B 模型替代 API | 进一步降成本、提精度 |
