@@ -184,7 +184,36 @@ def _calibrate_engagement(self, liked, commented, shared, followed, watch_ratio,
         liked = random() < keep_prob
 ```
 
-**效果**: like_rate 从 52% 降到 15-22%，仍偏高但已在可工作范围。进一步降到 5% 需要微调（SFT+DPO）。
+**效果 v1**: like_rate 从 52% 降到 15-22%（后处理门控），但仍偏高。
+
+**后续迭代 v2-v6**（混合模型方案）:
+
+发现 LLM 天然做二值决策（skip 或 watch_full），无法产生平滑的 watch_ratio 分布。最终方案改为：
+
+- **LLM 只输出 interest_level (1-10)** — 不再让 LLM 决定 like/comment/share
+- **统计模型生成 watch_ratio** — 用 interest 驱动的 Beta 分布采样，参数校准匹配真实分布
+- **参与动作独立生成** — 用 persona 的真实 base_rate × interest_mult × watch_ratio 做概率采样
+
+```python
+# 核心逻辑（v6）:
+if interest <= skip_threshold:     # 由品类亲和度决定阈值
+    watch_ratio ~ Exp(4.0)         # 快速跳过
+elif interest <= 7:
+    watch_ratio ~ Beta(3,2)*0.6+0.2  # 部分观看
+elif interest <= 9:
+    watch_ratio ~ Beta(4,1.5)*0.35+0.55  # 长观看
+else:
+    watch_ratio ~ Beta(6,1.5)*0.2+0.8    # 完播
+```
+
+**效果 v6（当前版本）**:
+
+| 指标 | 快手真实 | 模拟 v6 | 差距 |
+|------|---------|---------|------|
+| like_rate | 0.48% | 0.27% | 同数量级 |
+| skip_rate | 48.0% | 56.4% | +18% |
+| completion_rate | 7.8% | 20.8% | +167% |
+| avg_watch_ratio | 0.445 | 0.393 | -12% |
 
 ### 3.2 Python 3.9 兼容性
 

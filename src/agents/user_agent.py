@@ -44,24 +44,16 @@ Current session state:
 - Videos watched this session: {videos_watched}
 - Current fatigue level: {fatigue:.2f} (0=fresh, 1=exhausted)
 
-IMPORTANT - Real user engagement benchmarks (be realistic, not generous):
-- Most users SKIP 40-60% of videos after watching <2 seconds
-- Only 5-8% of watched videos get a LIKE
-- Only 0.5-2% get a COMMENT
-- Only 0.3-1% get a SHARE
-- Only 0.1-0.5% lead to FOLLOW
-- Users are selective and picky, not enthusiastic about everything
+Based on your personality and current state, decide how you'd react.
+Think about: does this video match your interests? How is your energy level?
 
-Based on your personality and current state, respond with a JSON object:
+Respond with a JSON object:
 {{
   "decision": "skip" | "watch_partial" | "watch_full",
-  "watch_percent": <integer 0-100, how much of the video you'd watch>,
-  "like": true | false,
-  "comment": true | false,
-  "share": true | false,
-  "follow_creator": true | false,
+  "watch_percent": <integer 0-100, what percent of the video you'd watch>,
+  "interest_level": <integer 1-10, how interesting is this video to you>,
   "continue": true | false,
-  "reason": "<one sentence explaining your decision>"
+  "reason": "<one sentence>"
 }}
 
 Respond with ONLY the JSON object, no other text."""
@@ -101,29 +93,38 @@ class UserAgent:
         except (json.JSONDecodeError, AttributeError):
             return self._fallback_decision(video)
 
-        decision_str = data.get("decision", "skip")
-        watch_pct = data.get("watch_percent", 0)
+        interest = data.get("interest_level", 5)
+        interest = max(1, min(10, int(interest)))
 
-        if decision_str == "skip":
+        import random as _rnd
+        rng = _rnd.Random(hash((self.user_id, video.video_id, self.session_video_count)))
+
+        fatigue_penalty = self.fatigue * 0.3
+        effective_interest = max(1, interest - fatigue_penalty * 10)
+
+        category_affinity = self.persona.preferences.interest_vector.get(video.category, 0.05)
+        if category_affinity < 0.02:
+            effective_interest = max(1, effective_interest - 3)
+
+        skip_threshold = 6 - int(category_affinity * 5)
+        skip_threshold = max(4, min(7, skip_threshold))
+
+        if effective_interest <= skip_threshold:
+            watch_ratio = max(0.0, rng.expovariate(4.0))
+            watch_ratio = min(watch_ratio, 0.12)
             action = UserAction.SKIP
-            watch_ratio = min(watch_pct, 10) / 100.0
-        elif decision_str == "watch_partial":
+        elif effective_interest <= 7:
+            watch_ratio = rng.betavariate(3.0, 2.0) * 0.6 + 0.2
             action = UserAction.WATCH_PARTIAL
-            watch_ratio = max(0.1, min(watch_pct, 95)) / 100.0
-        elif decision_str == "watch_full":
-            action = UserAction.WATCH_FULL
-            watch_ratio = max(0.8, min(watch_pct, 150)) / 100.0
+        elif effective_interest <= 9:
+            watch_ratio = rng.betavariate(4.0, 1.5) * 0.35 + 0.55
+            action = UserAction.WATCH_PARTIAL if watch_ratio < 0.8 else UserAction.WATCH_FULL
         else:
-            action = UserAction.SKIP
-            watch_ratio = 0.05
+            watch_ratio = rng.betavariate(6.0, 1.5) * 0.2 + 0.8
+            action = UserAction.WATCH_FULL
 
-        liked = bool(data.get("like", False))
-        commented = bool(data.get("comment", False))
-        shared = bool(data.get("share", False))
-        followed = bool(data.get("follow_creator", False))
-
-        liked, commented, shared, followed = self._calibrate_engagement(
-            liked, commented, shared, followed, watch_ratio, video,
+        liked, commented, shared, followed = self._generate_engagement(
+            interest, watch_ratio, video,
         )
 
         return AgentDecision(
@@ -137,43 +138,31 @@ class UserAgent:
             reasoning=data.get("reason", ""),
         )
 
-    def _calibrate_engagement(
+    def _generate_engagement(
         self,
-        liked: bool,
-        commented: bool,
-        shared: bool,
-        followed: bool,
+        interest_level: int,
         watch_ratio: float,
         video: Video,
     ) -> tuple[bool, bool, bool, bool]:
         import random
         rng = random.Random(hash((self.user_id, video.video_id, self.session_video_count)))
 
-        base_like = self.persona.behavior.like_rate
-        base_comment = self.persona.behavior.comment_rate
-        base_share = self.persona.behavior.share_rate
-        base_follow = self.persona.behavior.follow_rate
+        if watch_ratio < 0.15:
+            return False, False, False, False
 
-        engagement_mult = max(0.2, min(3.0, watch_ratio * 2))
+        interest_mult = (interest_level / 5.0) ** 1.5
+        watch_mult = min(2.0, watch_ratio)
+        boost = interest_mult * watch_mult
 
-        if liked:
-            keep_prob = base_like * engagement_mult / max(base_like * engagement_mult, 0.15)
-            liked = rng.random() < keep_prob
-        if commented:
-            keep_prob = base_comment * engagement_mult / max(base_comment * engagement_mult, 0.05)
-            commented = rng.random() < keep_prob
-        if shared:
-            keep_prob = base_share * engagement_mult / max(base_share * engagement_mult, 0.03)
-            shared = rng.random() < keep_prob
-        if followed:
-            keep_prob = base_follow * engagement_mult / max(base_follow * engagement_mult, 0.02)
-            followed = rng.random() < keep_prob
+        like_prob = self.persona.behavior.like_rate * boost
+        comment_prob = self.persona.behavior.comment_rate * boost
+        share_prob = self.persona.behavior.share_rate * boost
+        follow_prob = self.persona.behavior.follow_rate * boost
 
-        if watch_ratio < 0.3:
-            liked = False
-            commented = False
-            shared = False
-            followed = False
+        liked = rng.random() < like_prob
+        commented = rng.random() < comment_prob
+        shared = rng.random() < share_prob
+        followed = rng.random() < follow_prob
 
         return liked, commented, shared, followed
 
