@@ -1,0 +1,32 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Data files (large, download separately)
+data/KuaiRand-Pure/
+data/*.tar.gz
+data/*.zip
+
+# Output
+output/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Cloned reference repos
+Agent4Rec/
+AgentTorch/
+oasis/
+
+# OS
+.DS_Store
+Thumbs.db
