@@ -188,7 +188,13 @@ skip_threshold = 5 - int(category_affinity * 5)  # clamp [3, 6]
 
 ### 4.1 问题
 
-v11 的 20 agent 验证均值接近目标，但扩到 50 agent 后发现 **run-to-run 方差极大**：skip_rate 标准差 19.5pp（5 次从 19% 到 73%）。根因是 LLM 的 interest_level 输出存在 batch-level correlation——同一次运行中，LLM 要么集中给高 interest，要么集中给低 interest。
+v11 的 20 agent 验证均值接近目标，但扩到 50 agent 后发现 **run-to-run 方差极大**：skip_rate 标准差 19.5pp（5 次从 19% 到 73%）。
+
+**根因：LLM 的 batch-level correlation**
+
+DeepSeek 在 temperature=0.4 时，对同一个 prompt 每次 API 调用返回的 `interest_level` 不同。关键是这个偏差不是随机的——同一次运行中，LLM 倾向于**整体**给高 interest 或**整体**给低 interest。50 个 agent 并发请求时，它们共享同一个 LLM API 状态，偏差是**相关的**而非独立的。
+
+所以增加 agent 数量（20→50）并没有让方差收敛——因为这不是统计采样方差（独立随机的误差会随样本量增大而缩小），而是 LLM 的**系统性偏移**（所有 agent 同时偏向同一方向）。
 
 ### 4.2 尝试过的失败方案
 
@@ -197,21 +203,62 @@ v11 的 20 agent 验证均值接近目标，但扩到 50 agent 后发现 **run-t
 | Affinity prior blending | 混入确定性的品类亲和度先验 | completion 降至 ~1% | 先验太低（大部分亲和度 <0.1），砍掉了高 interest 尾部 |
 | Mean correction | 追踪 interest 均值，动态修正偏移 | 方差改善有限 | 无法修复双峰分布（LLM 同时输出很多 2 和 9，均值正确但分布错误） |
 
+**均值修正为什么失败**：假设 LLM 某次跑同时大量输出 interest=2 和 interest=9，均值是 5.5（可能恰好等于目标均值），修正量为 0，什么都不做。但此时 skip_rate 和 completion_rate 都会偏离——大量 2 导致过多 skip，大量 9 导致过多 completion。均值正确 ≠ 分布正确。
+
 ### 4.3 最终方案：分位数映射
 
-**核心思想**：LLM 的**排序**能力可靠（视频 A 比 B 更有趣），但**绝对值**分布不稳定。分位数映射保留排序、强制边际分布。
+#### 什么是 CDF
+
+CDF = Cumulative Distribution Function（累积分布函数），就是"小于等于某个值的概率是多少"。
+
+我们的 `TARGET_INTEREST_CDF = [0.04, 0.08, 0.15, 0.24, 0.43, 0.58, 0.73, 0.85, 0.94, 1.0]` 含义：
+
+| interest | CDF 值 | 含义 | 该级别占比 |
+|----------|--------|------|-----------|
+| ≤1 | 0.04 | 4% 的交互 interest≤1 | 4% |
+| ≤2 | 0.08 | | 4% |
+| ≤3 | 0.15 | | 7% |
+| ≤4 | 0.24 | | 9% |
+| ≤5 | **0.43** | **43% 的交互会 skip** | 19% |
+| ≤6 | 0.58 | | 15% |
+| ≤7 | 0.73 | | 15% |
+| ≤8 | 0.85 | | 12% |
+| ≤9 | 0.94 | | 9% |
+| ≤10 | 1.00 | | 6% |
+
+#### 核心思想
+
+LLM 的**排序**能力可靠（"视频 A 比 B 更有趣"这个判断是对的），但**绝对值**分布不稳定（某次跑全给 8 分，另一次全给 3 分）。分位数映射的做法是：**不看绝对分数，只看相对排名，然后用排名去查预设的目标分布**。
+
+#### 工作原理
 
 ```python
 TARGET_INTEREST_CDF = [0.04, 0.08, 0.15, 0.24, 0.43, 0.58, 0.73, 0.85, 0.94, 1.0]
 
 def calibrate_interest(raw_interest):
-    # 1. 更新经验 CDF
+    # 1. 记录 LLM 实际输出的分布
     interest_counts[raw - 1] += 1
-    # 2. 计算 raw 在经验分布中的百分位
+    # 2. 算出这个值在经验分布中的百分位（相对排名）
     percentile = empirical_cdf_midpoint(raw)
-    # 3. 通过目标 CDF 反查：percentile → 校准后 interest
+    # 3. 通过目标 CDF 反查：百分位 → 校准后 interest
     return inverse_target_cdf(percentile)
 ```
+
+#### 举例说明
+
+**场景 A**：LLM 这次跑集中给低分（80% 给了 interest=2）
+```
+raw interest=2 → 经验 CDF 中大约在第 40 百分位
+             → 目标 CDF 第 40 百分位 = interest 5 → skip
+```
+
+**场景 B**：LLM 另一次跑集中给高分（80% 给了 interest=8）
+```
+raw interest=8 → 经验 CDF 中大约在第 40 百分位（因为大家都是 8）
+             → 目标 CDF 第 40 百分位 = interest 5 → 同样 skip
+```
+
+两种极端情况下，校准后的分布都是一样的。**LLM 的绝对值波动被完全消除**，只有相对排序（哪些视频比其他视频更有趣）被保留下来。
 
 ### 4.4 同步调整
 
