@@ -106,8 +106,8 @@ class UserAgent:
         if category_affinity < 0.02:
             effective_interest = max(1, effective_interest - 3)
 
-        skip_threshold = 6 - int(category_affinity * 5)
-        skip_threshold = max(4, min(7, skip_threshold))
+        skip_threshold = 5 - int(category_affinity * 5)
+        skip_threshold = max(3, min(6, skip_threshold))
 
         if effective_interest <= skip_threshold:
             watch_ratio = max(0.0, rng.expovariate(4.0))
@@ -117,11 +117,11 @@ class UserAgent:
             watch_ratio = rng.betavariate(3.0, 2.0) * 0.6 + 0.2
             action = UserAction.WATCH_PARTIAL
         elif effective_interest <= 9:
-            watch_ratio = rng.betavariate(4.0, 1.5) * 0.35 + 0.55
+            watch_ratio = rng.betavariate(4.0, 1.9) * 0.35 + 0.51
             action = UserAction.WATCH_PARTIAL if watch_ratio < 0.8 else UserAction.WATCH_FULL
         else:
-            watch_ratio = rng.betavariate(6.0, 1.5) * 0.2 + 0.8
-            action = UserAction.WATCH_FULL
+            watch_ratio = rng.betavariate(5.0, 2.0) * 0.25 + 0.68
+            action = UserAction.WATCH_FULL if watch_ratio >= 0.8 else UserAction.WATCH_PARTIAL
 
         liked, commented, shared, followed = self._generate_engagement(
             interest, watch_ratio, video,

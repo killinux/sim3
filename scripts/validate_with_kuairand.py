@@ -43,7 +43,7 @@ async def main():
     logger.info("  avg_watch_ratio: %.4f", gt.avg_watch_ratio)
 
     logger.info("Building personas from real user data...")
-    personas = loader.build_personas(n_users=50, seed=42)
+    personas = loader.build_personas(n_users=20, seed=42)
     logger.info("Built %d personas", len(personas))
 
     logger.info("Building content pool from real videos...")
@@ -65,7 +65,7 @@ async def main():
     scheduler = LLMScheduler(
         provider="deepseek",
         model="deepseek-chat",
-        temperature=0.7,
+        temperature=0.4,
         max_tokens=300,
         max_concurrent=32,
         timeout_seconds=60,
