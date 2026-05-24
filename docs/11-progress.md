@@ -162,7 +162,17 @@
 
 **最终方案**: 分位数映射（quantile mapping）。追踪 LLM interest 的经验 CDF，映射到目标 CDF。保留 LLM 的排序能力，强制边际分布。同时降 temperature 0.7→0.2，降低亲和度惩罚 -3→-1。详见 [14-50agent-validation-report.md](14-50agent-validation-report.md)。
 
-### 3.4 Python 3.9 兼容性
+### 3.4 Embedding 对齐 Bug（AB 方向反转）
+
+**问题**: AB 方向验证首次运行时方向**完全反转**——个性化推荐反而比随机推荐效果更差（1/4 指标匹配）。
+
+**根因**: `kuairand_loader.py` 中视频 embedding 使用 `hash(category) % 32` 编码品类位置，而用户 embedding 使用 `CATEGORIES.index(category)` 编码。例如 comedy 在用户侧是 index 0，在视频侧是 index 28，两者完全不对齐。dot product 算出来的不是品类匹配度，而是随机噪声。
+
+**影响**: 个性化推荐（依赖 dot product 选视频）实际上是随机匹配，效果比真随机更差。
+
+**修正**: 视频 embedding 改用 `CATEGORIES.index(category) % embedding_dim`。注意 `content_pool.py` 的合成视频没有此 bug。
+
+### 3.5 Python 3.9 兼容性
 
 **修正**: `int | None` 语法改为 `Optional[int]`。
 
@@ -247,6 +257,7 @@ KuaiRand 数据
 3. **LLM 排序可靠、分布不可靠** — 分位数映射保留排序、强制分布，9 倍方差缩小
 4. **后处理会覆盖校准** — 疲劳/亲和度惩罚在校准之后执行，需预留余量（CDF 设 43% 以达到实际 48%）
 5. **先降方差再调均值** — 方差太大时参数调整在噪声中迷失方向
+6. **Embedding 对齐至关重要** — 用户和视频的品类编码必须一致，否则个性化推荐等于随机匹配（导致 AB 方向反转）
 
 ---
 
@@ -261,7 +272,7 @@ KuaiRand 数据
 | 运行间方差 | ✅ 已解决 | skip std 从 19.5pp → 2.2pp（9倍改善） |
 | avg_watch_ratio | ⚠️ 接近 | 0.414 vs 真实 0.445（差 7%） |
 | like_rate | ⚠️ 偏低 | 0.11% vs 真实 0.48% |
-| AB 方向一致性 | ❌ 待做 | 用 KuaiRand 随机 vs 正常推荐构造已知 AB |
+| **AB 方向一致性** | **✅ 通过** | **4/4 指标方向正确，5/5 次运行无翻转**。详见 [docs/16](16-ab-direction-validation.md) |
 | 分品类验证 | ❌ 待做 | 各品类的参与率是否分别对齐 |
 | 1000 agent 缩放 | ❌ 待做 | 性能和成本验证 |
 | 历史 AB 回放 | ❌ 待做 | 需要真实 AB 实验数据 |
@@ -272,7 +283,8 @@ KuaiRand 数据
 
 | 优先级 | 任务 | 说明 |
 |--------|------|------|
-| **P0** | **AB 方向一致性验证** | 用 KuaiRand 随机 vs 正常推荐构造已知 AB，验证模拟能否正确预测方向。这是系统的核心价值验证 |
+| ~~P0~~ | ~~AB 方向一致性验证~~ | ✅ 已完成，4/4 指标方向正确 |
+| P1 | AB 效应量校准 | 方向正确但幅度偏差较大（如 skip 真实变化-33%，模拟-47%） |
 | P1 | avg_watch_ratio 差距缩小 | 0.414 vs 0.445，可能需要提升 Band 2/3 参数 |
 | P1 | like_rate 修复 | 0.11% vs 0.48%，需调 `_generate_engagement` 中的 boost 公式 |
 | P1 | 分品类验证 | 确认不同品类的参与模式差异被捕捉 |
@@ -294,3 +306,4 @@ KuaiRand 数据
 | [docs/13](13-beta-calibration.md) | Beta 分布参数校准原理与迭代记录 |
 | [docs/14](14-50agent-validation-report.md) | 50 Agent 验证报告（含分位数映射前后对比） |
 | [docs/15](15-calibration-session-log.md) | 校准 session 完整操作日志（含费用） |
+| [docs/16](16-ab-direction-validation.md) | AB 方向一致性验证报告（含 embedding bug 修复） |
