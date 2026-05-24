@@ -108,6 +108,7 @@ class SimulationEngine:
         )
 
     async def run(self) -> list[InteractionRecord]:
+        UserAgent.reset_interest_tracker()
         for day in range(self.config.num_simulated_days):
             logger.info("=== Simulated Day %d ===", day + 1)
             await self._simulate_day(day)

@@ -65,7 +65,7 @@ async def main():
     scheduler = LLMScheduler(
         provider="deepseek",
         model="deepseek-chat",
-        temperature=0.4,
+        temperature=0.2,
         max_tokens=300,
         max_concurrent=32,
         timeout_seconds=60,

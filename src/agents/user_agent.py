@@ -60,6 +60,36 @@ Respond with ONLY the JSON object, no other text."""
 
 
 class UserAgent:
+    TARGET_INTEREST_CDF = [0.04, 0.08, 0.15, 0.24, 0.43, 0.58, 0.73, 0.85, 0.94, 1.0]
+    _interest_counts = [0] * 10
+    _interest_total = 0
+    _CALIBRATION_WARMUP = 30
+
+    @classmethod
+    def reset_interest_tracker(cls):
+        cls._interest_counts = [0] * 10
+        cls._interest_total = 0
+
+    @classmethod
+    def calibrate_interest(cls, raw_interest: int) -> int:
+        idx = max(0, min(9, raw_interest - 1))
+        cls._interest_counts[idx] += 1
+        cls._interest_total += 1
+        if cls._interest_total < cls._CALIBRATION_WARMUP:
+            return raw_interest
+        cum = 0.0
+        empirical_cdf = []
+        for c in cls._interest_counts:
+            cum += c / cls._interest_total
+            empirical_cdf.append(cum)
+        lower = empirical_cdf[idx - 1] if idx > 0 else 0.0
+        upper = empirical_cdf[idx]
+        percentile = (lower + upper) / 2.0
+        for i, threshold in enumerate(cls.TARGET_INTEREST_CDF):
+            if percentile <= threshold:
+                return i + 1
+        return 10
+
     def __init__(self, persona: UserPersona, memory_window: int = 30):
         self.persona = persona
         self.memory = AgentMemory(window_size=memory_window)
@@ -93,8 +123,9 @@ class UserAgent:
         except (json.JSONDecodeError, AttributeError):
             return self._fallback_decision(video)
 
-        interest = data.get("interest_level", 5)
-        interest = max(1, min(10, int(interest)))
+        raw_interest = data.get("interest_level", 5)
+        raw_interest = max(1, min(10, int(raw_interest)))
+        interest = UserAgent.calibrate_interest(raw_interest)
 
         import random as _rnd
         rng = _rnd.Random(hash((self.user_id, video.video_id, self.session_video_count)))
@@ -104,7 +135,7 @@ class UserAgent:
 
         category_affinity = self.persona.preferences.interest_vector.get(video.category, 0.05)
         if category_affinity < 0.02:
-            effective_interest = max(1, effective_interest - 3)
+            effective_interest = max(1, effective_interest - 1)
 
         skip_threshold = 5 - int(category_affinity * 5)
         skip_threshold = max(3, min(6, skip_threshold))
@@ -114,7 +145,7 @@ class UserAgent:
             watch_ratio = min(watch_ratio, 0.12)
             action = UserAction.SKIP
         elif effective_interest <= 7:
-            watch_ratio = rng.betavariate(3.0, 2.0) * 0.6 + 0.2
+            watch_ratio = rng.betavariate(3.0, 2.0) * 0.5 + 0.35
             action = UserAction.WATCH_PARTIAL
         elif effective_interest <= 9:
             watch_ratio = rng.betavariate(4.0, 1.9) * 0.35 + 0.51

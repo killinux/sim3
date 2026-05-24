@@ -184,34 +184,79 @@ skip_threshold = 5 - int(category_affinity * 5)  # clamp [3, 6]
 
 单次最优（Run 3）：completion 8.70%, avg_wr **0.4461** vs 真实 0.4454。
 
-## 四、关键发现与原则
+## 四、分位数映射校准（v12，方差解决方案）
 
-### 4.1 参数灵敏度排序
+### 4.1 问题
 
-1. **skip_threshold**：影响最大。降 1 个单位可以将 skip_rate 从 59% 拉到 44%，同时全面影响 avg_wr 和 completion
-2. **Band 3 的 β 参数**：对 completion_rate 最敏感。β 从 1.5→2.0 可以把 Band 内完播率从 ~50% 降到 ~10%
-3. **Band 4 的 offset**：决定完播下限。offset=0.8 意味着 100% 完播，offset=0.68 则只有 ~80% 完播
-4. **LLM temperature**：不直接影响均值，但决定方差。0.7→0.4 让 3 次跑的 skip_rate 标准差从 ~20pp 降到 ~15pp
+v11 的 20 agent 验证均值接近目标，但扩到 50 agent 后发现 **run-to-run 方差极大**：skip_rate 标准差 19.5pp（5 次从 19% 到 73%）。根因是 LLM 的 interest_level 输出存在 batch-level correlation——同一次运行中，LLM 要么集中给高 interest，要么集中给低 interest。
 
-### 4.2 调参方法论
+### 4.2 尝试过的失败方案
 
-1. **先降方差再调均值**：temperature 太高时均值估计不准，参数调整在噪声中迷失方向
-2. **从最大杠杆开始**：先调 skip_threshold（最大杠杆），再调 Band 3/4 的 Beta（次要杠杆）
-3. **逐参数二分法**：每次只改一个参数，3次均值判断方向，收敛到目标
-4. **注意耦合**：降 skip_threshold 不仅降 skip_rate，也会因为更多视频进入 partial watch 而提升 avg_wr；但不会直接影响 completion（Band 3/4 没变）
+| 方案 | 原理 | 结果 | 失败原因 |
+|------|------|------|---------|
+| Affinity prior blending | 混入确定性的品类亲和度先验 | completion 降至 ~1% | 先验太低（大部分亲和度 <0.1），砍掉了高 interest 尾部 |
+| Mean correction | 追踪 interest 均值，动态修正偏移 | 方差改善有限 | 无法修复双峰分布（LLM 同时输出很多 2 和 9，均值正确但分布错误） |
 
-### 4.3 仍存在的问题
+### 4.3 最终方案：分位数映射
 
-- **方差偏大**：20 agent × 15 videos = 300 interactions，3 次跑 skip_rate 仍有 26%-64% 的波动。扩到 50+ agent 或多轮平均可缓解
-- **like_rate 偏低**：0.11% vs 真实 0.48%，可能需要调 `_generate_engagement` 中的 boost 公式
-- **skip_rate 略低**：均值 43.8% vs 真实 47.98%，可能需要 skip_threshold 微调回 5.5（但只能取整，无法精调）
+**核心思想**：LLM 的**排序**能力可靠（视频 A 比 B 更有趣），但**绝对值**分布不稳定。分位数映射保留排序、强制边际分布。
 
-## 五、代码位置
+```python
+TARGET_INTEREST_CDF = [0.04, 0.08, 0.15, 0.24, 0.43, 0.58, 0.73, 0.85, 0.94, 1.0]
 
-| 内容 | 文件 | 行号 |
-|------|------|------|
-| Beta 分布采样 | `src/agents/user_agent.py` | 112-124 |
-| Skip 阈值计算 | `src/agents/user_agent.py` | 109-110 |
-| 参与行为生成 | `src/agents/user_agent.py` | 141-167 |
-| 验证脚本 | `scripts/validate_with_kuairand.py` | - |
-| LLM 温度配置 | `scripts/validate_with_kuairand.py` | 68 |
+def calibrate_interest(raw_interest):
+    # 1. 更新经验 CDF
+    interest_counts[raw - 1] += 1
+    # 2. 计算 raw 在经验分布中的百分位
+    percentile = empirical_cdf_midpoint(raw)
+    # 3. 通过目标 CDF 反查：percentile → 校准后 interest
+    return inverse_target_cdf(percentile)
+```
+
+### 4.4 同步调整
+
+| 调整 | 旧值 | 新值 | 原因 |
+|------|------|------|------|
+| Temperature | 0.4 | 0.2 | 降低 LLM 基础方差 |
+| Band 2 | `Beta(3,2)*0.6+0.2` | `*0.5+0.35` | 提升 avg_wr |
+| 低亲和度惩罚 | -3 | -1 | 防止校准被后处理覆盖 |
+
+### 4.5 效果
+
+| 指标 | 校准前 (std) | 校准后 (std) | 真实值 | 方差缩小 |
+|------|-------------|-------------|--------|---------|
+| skip_rate | 53.5% (19.5pp) | **48.3%** (2.2pp) | 47.98% | **9x** |
+| completion | 7.32% (4.1pp) | **8.69%** (1.2pp) | 7.78% | **3x** |
+| avg_wr | 0.376 (0.124) | **0.414** (0.015) | 0.445 | **8x** |
+
+## 五、关键发现与原则
+
+### 5.1 参数灵敏度排序
+
+1. **分位数映射 CDF**：影响最大的"元参数"。直接控制 interest 分布，决定各 Band 的占比
+2. **skip_threshold**：在 CDF 固定的情况下，仍是 skip_rate 的主要控制旋钮
+3. **Band 3/4 的 Beta β 参数**：对 completion_rate 最敏感
+4. **低亲和度惩罚**：影响 CDF 校准的有效性（惩罚太大会覆盖校准结果）
+
+### 5.2 调参方法论
+
+1. **先降方差再调均值**：temperature 和分位数映射是方差的主要控制手段
+2. **分位数映射 > 均值修正**：均值修正无法处理双峰分布，分位数映射从根本上解决
+3. **逐参数二分法**：每次只改一个参数，5 次均值判断方向
+4. **注意后处理覆盖**：校准发生在 raw interest 级别，疲劳/亲和度惩罚在后面可能覆盖校准效果
+
+### 5.3 仍存在的问题
+
+- **avg_watch_ratio 差 7%**：0.414 vs 0.445，可能需要提升 Band 2/3 的 Beta 参数
+- **like_rate 偏低**：0.11% vs 0.48%，需调 `_generate_engagement` 中的 boost 公式
+- **warmup 期**：前 30 个交互未校准，50 agent 并行时影响约 4%
+
+## 六、代码位置
+
+| 内容 | 文件 |
+|------|------|
+| 分位数映射 | `src/agents/user_agent.py` — `calibrate_interest()` |
+| 目标 CDF | `src/agents/user_agent.py` — `TARGET_INTEREST_CDF` |
+| Beta 分布采样 | `src/agents/user_agent.py` — `parse_llm_response()` |
+| Tracker 重置 | `src/simulation/engine.py` — `run()` |
+| 验证脚本 | `scripts/validate_with_kuairand.py` |
