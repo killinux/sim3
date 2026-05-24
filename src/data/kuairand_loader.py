@@ -267,7 +267,7 @@ class KuaiRandLoader:
 
             if category not in tag_centroids:
                 centroid = np.zeros(embedding_dim)
-                idx = hash(category) % embedding_dim
+                idx = CATEGORIES.index(category) % embedding_dim if category in CATEGORIES else hash(category) % embedding_dim
                 centroid[idx] = 1.0
                 centroid += pool.np_rng.randn(embedding_dim) * 0.2
                 tag_centroids[category] = centroid / np.linalg.norm(centroid)
